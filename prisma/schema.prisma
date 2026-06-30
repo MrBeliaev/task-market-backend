@@ -1,0 +1,170 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TaskStatus {
+  OPEN
+  ASSIGNED
+  IN_PROGRESS
+  UNDER_REVIEW
+  COMPLETED
+  DISPUTED
+  CANCELLED
+}
+
+model Task {
+  id              Int        @id @default(autoincrement())
+  onChainId       Int        @map("on_chain_id")
+  chainId         Int        @map("chain_id")
+  client          String     @db.VarChar(42)
+  executor        String?    @db.VarChar(42)
+  reward          String     // Wei as string for precision
+  deadline        DateTime
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+  status          TaskStatus @default(OPEN)
+  metadataHash    String     @map("metadata_hash") @db.VarChar(66)
+
+  // Off-chain metadata (not stored on contract)
+  title           String     @db.VarChar(200)
+  description     String     @db.Text
+  contactInfo     String     @map("contact_info") @db.VarChar(500)
+  referenceLink   String?    @map("reference_link") @db.VarChar(500)
+  category        String?    @db.VarChar(100)
+  skills          String[]   @default([])
+
+  // Multi-sig state (synced from chain)
+  clientConfirmed   Boolean  @default(false) @map("client_confirmed")
+  executorConfirmed Boolean  @default(false) @map("executor_confirmed")
+
+  // TaskCompleted event data (synced from chain)
+  payoutWei         String?  @map("payout_wei")
+  feeWei            String?  @map("fee_wei")
+
+  // TaskDisputed event data (synced from chain)
+  disputedBy        String?  @db.VarChar(42) @map("disputed_by")
+
+  // DisputeResolved event data (synced from chain)
+  disputeClientRefund   String?  @map("dispute_client_refund")
+  disputeExecutorPayout String?  @map("dispute_executor_payout")
+
+  // Relations
+  applications    Application[]
+  comments        Comment[]
+  disputeMessages DisputeMessage[]
+  taskMessages    TaskMessage[]
+
+  @@unique([onChainId, chainId])   // a task is unique per (contractTaskId, chain)
+  @@index([chainId])
+  @@index([client])
+  @@index([executor])
+  @@index([status])
+  @@index([category])
+  @@map("tasks")
+}
+
+model Application {
+  id          Int      @id @default(autoincrement())
+  taskId      Int      @map("task_id")
+  applicant   String   @db.VarChar(42)
+  message     String   @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  task        Task     @relation(fields: [taskId], references: [id])
+
+  @@unique([taskId, applicant])
+  @@map("applications")
+}
+
+model Comment {
+  id          Int      @id @default(autoincrement())
+  taskId      Int      @map("task_id")
+  author      String   @db.VarChar(42)
+  content     String   @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  task        Task     @relation(fields: [taskId], references: [id])
+
+  @@map("comments")
+}
+
+// General task chat between client and executor (with optional file attachments).
+// Visible to admin when task is DISPUTED.
+model TaskMessage {
+  id        Int      @id @default(autoincrement())
+  taskId    Int      @map("task_id")
+  sender    String   @db.VarChar(42)
+  content   String   @db.Text
+  fileUrl   String?  @map("file_url")  @db.VarChar(500)
+  fileName  String?  @map("file_name") @db.VarChar(255)
+  fileSize  Int?     @map("file_size")
+  createdAt DateTime @default(now())   @map("created_at")
+
+  task Task @relation(fields: [taskId], references: [id])
+
+  @@index([taskId])
+  @@map("task_messages")
+}
+
+// Dispute chat messages with optional file attachments.
+model DisputeMessage {
+  id          Int      @id @default(autoincrement())
+  taskId      Int      @map("task_id")
+  sender      String   @db.VarChar(42)   // wallet address (lowercase)
+  isAdmin     Boolean  @default(false) @map("is_admin")
+  content     String   @db.Text
+  fileUrl     String?  @map("file_url")  @db.VarChar(500)
+  fileName    String?  @map("file_name") @db.VarChar(255)
+  fileSize    Int?     @map("file_size") // bytes
+  createdAt   DateTime @default(now())   @map("created_at")
+
+  task        Task     @relation(fields: [taskId], references: [id])
+
+  @@index([taskId])
+  @@map("dispute_messages")
+}
+
+// Individual ETH withdrawals via the pull-payment withdraw() function.
+model Withdrawal {
+  id          Int      @id @default(autoincrement())
+  chainId     Int      @map("chain_id")
+  recipient   String   @db.VarChar(42)
+  amount      String   // Wei as string
+  blockNumber Int      @map("block_number")
+  txHash      String   @map("tx_hash") @db.VarChar(66)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Idempotency: a re-processed block batch must not insert a withdrawal twice.
+  // The indexer relies on this for its ON CONFLICT DO NOTHING upsert.
+  @@unique([chainId, txHash, recipient], name: "withdrawals_chain_tx_recipient_key")
+  @@index([chainId, recipient])
+  @@map("withdrawals")
+}
+
+// One row per indexed chain — tracks how far the Go indexer has processed.
+model IndexerState {
+  chainId         Int      @id @map("chain_id")
+  lastBlockNumber Int      @default(0) @map("last_block_number")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("indexer_state")
+}
+
+// Per-chain Go indexer configuration. The indexer reads all rows where
+// enabled = true on startup; toggle a chain on/off by flipping this flag.
+model ChainConfig {
+  chainId         Int      @id @map("chain_id")
+  rpcUrl          String   @map("rpc_url")
+  contractAddress String   @map("contract_address") @db.VarChar(42)
+  startBlock      Int      @default(0) @map("start_block")
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("chain_config")
+}
