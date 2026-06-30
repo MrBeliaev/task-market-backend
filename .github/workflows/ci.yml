@@ -1,0 +1,37 @@
+name: Backend CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The Prisma client is generated into src/generated (gitignored), so it
+      # must be regenerated from the schema before anything imports it.
+      # generate does not connect to the database; the URL only has to parse.
+      - run: npm run db:generate
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/db
+
+      - run: npm run lint
+
+      - run: npm run dependency:check
+
+      - run: npm run build
+
+      - run: npm run test
+
+      - name: Audit (advisory only)
+        run: npm audit --audit-level=high
+        continue-on-error: true
